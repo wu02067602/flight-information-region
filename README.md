@@ -16,7 +16,7 @@ pip install -r requirements.txt
 python adiz_image_scraper.py
 ```
 
-圖片預設儲存於 `adiz_images/` 資料夾，依文章 ID 分子目錄。
+圖片預設儲存於 `adiz_images/` 資料夾，依文章 ID 分子目錄。預設爬取目錄前 20 頁的公告。
 
 ### 指定輸出目錄
 
@@ -47,7 +47,7 @@ python adiz_image_scraper.py --delay 2
 |------|------|--------|
 | `-o`, `--output` | 圖片儲存目錄 | `adiz_images` |
 | `--list-url` | 目錄頁面 URL | `https://www.mnd.gov.tw/news/plaactlist` |
-| `--max-pages` | 最多爬取幾頁目錄 | 全部 |
+| `--max-pages` | 最多爬取幾頁目錄 | 20 |
 | `--max-articles` | 最多爬取幾則公告 | 全部 |
 | `--delay` | 請求間隔（秒） | 1.0 |
 

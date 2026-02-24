@@ -51,17 +51,20 @@ def get_article_links(
     """
     從目錄頁面取得所有公告文章的連結
     國防部網站以 JavaScript 動態載入，使用正則從 HTML 擷取 news/plaact/ID
+    分頁格式：plaactlist/1, plaactlist/2, plaactlist/3 ...
     """
     base_url = "https://www.mnd.gov.tw/"
+    # 正規化目錄 URL（移除尾端斜線，供分頁拼接）
+    list_url_base = list_url.rstrip("/")
     article_links = []
     page = 1
 
     while True:
         if page == 1:
-            page_url = list_url
+            page_url = list_url_base
         else:
-            sep = "&" if "?" in list_url else "?"
-            page_url = f"{list_url}{sep}page={page}"
+            # 國防部分頁使用 plaactlist/2, plaactlist/3 格式
+            page_url = f"{list_url_base}/{page}"
 
         try:
             resp = session.get(page_url, timeout=15)
@@ -209,8 +212,8 @@ def main():
     parser.add_argument(
         "--max-pages",
         type=int,
-        default=None,
-        help="最多爬取幾頁目錄 (預設: 全部)",
+        default=20,
+        help="最多爬取幾頁目錄 (預設: 20)",
     )
     parser.add_argument(
         "--max-articles",
