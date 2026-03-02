@@ -67,7 +67,7 @@ def get_article_links(
             page_url = f"{list_url_base}/{page}"
 
         try:
-            resp = session.get(page_url, timeout=15)
+            resp = session.get(page_url, timeout=15, verify=False)
             resp.raise_for_status()
             resp.encoding = resp.apparent_encoding or "utf-8"
         except requests.RequestException as e:
@@ -105,7 +105,7 @@ def get_images_from_article(session: requests.Session, article_url: str) -> list
     images = []
 
     try:
-        resp = session.get(article_url, timeout=15)
+        resp = session.get(article_url, timeout=15, verify=False)
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding or "utf-8"
     except requests.RequestException as e:
@@ -184,7 +184,7 @@ def get_images_from_article(session: requests.Session, article_url: str) -> list
 def download_image(session: requests.Session, url: str, save_path: Path) -> bool:
     """下載單一圖片並儲存"""
     try:
-        resp = session.get(url, timeout=30, stream=True)
+        resp = session.get(url, timeout=30, stream=True, verify=False)
         resp.raise_for_status()
         with open(save_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
