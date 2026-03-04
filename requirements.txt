@@ -1,2 +1,15 @@
 requests>=2.28.0
 beautifulsoup4>=4.11.0
+
+# ADIZ 座標抽取
+opencv-python>=4.8.0
+numpy>=1.24.0
+psycopg2-binary>=2.9.0
+Pillow>=10.0.0
+
+# OCR（繁中最佳）
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+
+# SVG 支援（可選）
+cairosvg>=2.7.0
