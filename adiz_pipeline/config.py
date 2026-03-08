@@ -29,6 +29,14 @@ RED_HUE_RANGE_2 = (165, 180)  # HSV 紅色另一端
 MIN_POLYGON_AREA = 500  # 最小多邊形面積（像素²）
 MAX_POLYGON_AREA_RATIO = 0.5  # 最大面積佔圖比例
 
+# 線段偵測參數
+MIN_LINE_LENGTH = 20  # 最小線段長度（像素）
+MAX_LINE_GAP = 15  # 虛線合併時最大間距（像素）
+DASHED_ANGLE_TOLERANCE = 15  # 虛線段方向容忍（度）
+MIN_MARKER_AREA = 80  # 最小標點面積（像素²）
+MAX_MARKER_AREA = 3000  # 最大標點面積（像素²）
+MIN_MARKER_CIRCULARITY = 0.5  # 最小圓形度（4*pi*area/perimeter^2）
+
 # 表格 ROI（左上角，佔圖比例）
 TABLE_ROI_LEFT = 0.0
 TABLE_ROI_TOP = 0.0

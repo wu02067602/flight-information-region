@@ -37,6 +37,12 @@ def get_detections_schema() -> list:
         bigquery.SchemaField("pixel_polygon", "STRING"),  # JSON
         bigquery.SchemaField("pixel_bbox", "STRING"),  # JSON
         bigquery.SchemaField("geometry", "GEOGRAPHY"),
+        bigquery.SchemaField("geometry_type", "STRING"),  # polygon | linestring
+        bigquery.SchemaField("line_geometry", "GEOGRAPHY"),
+        bigquery.SchemaField("line_type", "STRING"),  # solid | dashed
+        bigquery.SchemaField("pixel_line", "STRING"),  # JSON
+        bigquery.SchemaField("marker_center_pixel", "STRING"),  # JSON
+        bigquery.SchemaField("association_confidence", "FLOAT64"),
         bigquery.SchemaField("ocr_raw_text", "STRING"),
         bigquery.SchemaField("confidence_score", "FLOAT64"),
         bigquery.SchemaField("confidence_breakdown", "STRING"),  # JSON
@@ -62,6 +68,9 @@ def get_events_schema() -> list:
         bigquery.SchemaField("flight_no", "STRING"),
         bigquery.SchemaField("remarks", "STRING"),
         bigquery.SchemaField("geometry", "GEOGRAPHY"),
+        bigquery.SchemaField("line_geometry", "GEOGRAPHY"),
+        bigquery.SchemaField("line_type", "STRING"),
+        bigquery.SchemaField("line_text", "STRING"),
         bigquery.SchemaField("review_status", "STRING"),
         bigquery.SchemaField("reviewer", "STRING"),
         bigquery.SchemaField("reviewed_at", "TIMESTAMP"),
