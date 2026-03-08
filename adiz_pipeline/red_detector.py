@@ -10,6 +10,8 @@ import numpy as np
 
 from .config import (
     DASHED_ANGLE_TOLERANCE,
+    LINE_EXCLUDE_DILATE,
+    LINE_ROI_LEFT,
     MAP_ROI_BOTTOM,
     MAP_ROI_LEFT,
     MAP_ROI_RIGHT,
@@ -23,6 +25,7 @@ from .config import (
     MIN_MARKER_CIRCULARITY,
     MIN_PATH_LENGTH,
     MIN_POLYGON_AREA,
+    POLYGON_APPROX_EPS,
     RED_HUE_RANGE,
     RED_HUE_RANGE_2,
     RED_SAT_MIN,
@@ -160,11 +163,15 @@ def detect_red_lines(
     offset_y = int(h * MAP_ROI_TOP)
 
     red_mask = _get_red_mask(roi)
+    # 排除左側表格區
+    left_cut = int(roi_w * LINE_ROI_LEFT)
+    if left_cut > 0:
+        red_mask[:, :left_cut] = 0
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
     line_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
     line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel)
 
-    # 排除多邊形與標點區域，避免將邊框/圓弧誤檢為線段
+    # 排除多邊形與標點區域（含邊框膨脹），避免將邊框誤檢為線段
     exclude_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
     if exclude_polygons:
         for poly in exclude_polygons:
@@ -173,14 +180,15 @@ def detect_red_lines(
                 dtype=np.int32,
             )
             cv2.fillPoly(exclude_mask, [pts], 255)
+            cv2.drawContours(exclude_mask, [pts], -1, 255, thickness=LINE_EXCLUDE_DILATE + 2)
     if exclude_markers:
         for m in exclude_markers:
             cx, cy = int(m.center[0] - offset_x), int(m.center[1] - offset_y)
-            r = int(m.radius) + 8
+            r = int(m.radius) + 4
             if 0 <= cx < roi_w and 0 <= cy < roi_h:
-                cv2.circle(exclude_mask, (cx, cy), max(r, 15), 255, -1)
+                cv2.circle(exclude_mask, (cx, cy), max(r, 10), 255, -1)
     if np.any(exclude_mask > 0):
-        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (LINE_EXCLUDE_DILATE, LINE_EXCLUDE_DILATE))
         exclude_mask = cv2.dilate(exclude_mask, dilate_k)
         line_mask = cv2.subtract(line_mask, exclude_mask)
 
@@ -287,10 +295,11 @@ def detect_red_regions(
     offset_y = int(h * MAP_ROI_TOP)
 
     red_mask = _get_red_mask(roi)
-    # 形態學處理，連接斷線
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+    # 形態學處理，連接斷線（較強閉合以處理虛線邊框）
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open)
 
     # 找輪廓
     contours, _ = cv2.findContours(
@@ -314,8 +323,8 @@ def detect_red_regions(
         if circularity > MAX_POLYGON_CIRCULARITY:
             continue
 
-        # 近似多邊形
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        # 近似多邊形（略放寬誤差以保留細長輪廓的頂點）
+        approx = cv2.approxPolyDP(cnt, POLYGON_APPROX_EPS * peri, True)
 
         if len(approx) < 3:
             continue
@@ -340,5 +349,28 @@ def detect_red_regions(
             area=area,
             confidence=min(1.0, confidence),
         ))
+
+    # NMS：重疊多邊形保留較大者
+    if len(polygons) > 1:
+        sorted_p = sorted(polygons, key=lambda p: p.area, reverse=True)
+        keep = []
+        for pi in sorted_p:
+            xi, yi, wi, hi = pi.pixel_bbox
+            ai = pi.area
+            discard = False
+            for pj in keep:
+                xj, yj, wj, hj = pj.pixel_bbox
+                inter_x = max(xi, xj)
+                inter_y = max(yi, yj)
+                inter_w = min(xi + wi, xj + wj) - inter_x
+                inter_h = min(yi + hi, yj + hj) - inter_y
+                if inter_w > 0 and inter_h > 0:
+                    inter_area = inter_w * inter_h
+                    if inter_area / ai > 0.5:
+                        discard = True
+                        break
+            if not discard:
+                keep.append(pi)
+        polygons = keep
 
     return polygons
