@@ -7,13 +7,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cv2
 import numpy as np
 
-from adiz_pipeline.association import associate_polygons_to_rows
-from adiz_pipeline.coordinate_converter import pixel_to_geography, validate_geometry
+from adiz_pipeline.association import (
+    associate_lines_to_rows,
+    associate_markers_to_lines,
+    associate_polygons_to_rows,
+)
+from adiz_pipeline.coordinate_converter import (
+    pixel_line_to_geography,
+    pixel_to_geography,
+    validate_geometry,
+)
 from adiz_pipeline.image_loader import load_image
 from adiz_pipeline.ocr_gemini import TableRow
-from adiz_pipeline.red_detector import RedPolygon, detect_red_regions
+from adiz_pipeline.red_detector import (
+    RedLine,
+    RedMarker,
+    RedPolygon,
+    detect_red_lines,
+    detect_red_markers,
+    detect_red_regions,
+)
 
 
 def test_red_detector_on_synthetic():
@@ -51,3 +67,61 @@ def test_validate_geometry():
     """測試幾何驗證"""
     assert validate_geometry("POLYGON((120 25, 121 25, 121 24, 120 24, 120 25))")
     assert not validate_geometry("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))")
+
+
+def test_detect_red_lines():
+    """合成圖測試紅色線段偵測（線需在 MAP_ROI 內，y>=28%*h）"""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    img[80:82, 20:180] = [0, 0, 255]  # BGR 紅色實線，在 ROI 內
+    lines = detect_red_lines(img, min_length=15, min_path_length=50)
+    assert isinstance(lines, list)
+    assert len(lines) >= 1
+    assert lines[0].line_type in ("solid", "dashed")
+    assert len(lines[0].pixel_path) >= 2
+
+
+def test_detect_red_markers():
+    """合成圖測試紅色圓形標點偵測"""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    # 畫紅色圓
+    import cv2
+    cv2.circle(img, (100, 100), 15, (0, 0, 255), -1)
+    markers = detect_red_markers(img, min_area=50, max_area=5000)
+    assert isinstance(markers, list)
+
+
+def test_pixel_line_to_geography():
+    """測試線段轉 LINESTRING"""
+    points = [(100, 200), (150, 250), (200, 200)]
+    wkt, conf = pixel_line_to_geography(points)
+    assert "LINESTRING" in wkt
+    assert "POLYGON" not in wkt
+    assert 0 <= conf <= 1
+
+
+def test_associate_markers_to_lines():
+    """測試標點與線段關聯"""
+    lines = [
+        RedLine(pixel_path=[(50, 50), (150, 50)], line_type="solid", confidence=0.9),
+    ]
+    markers = [
+        RedMarker(center=(100, 52), radius=5, marker_label=None, confidence=0.9),
+    ]
+    mtl = associate_markers_to_lines(lines, markers, distance_threshold=25)
+    assert 0 in mtl
+    assert 0 in mtl[0]
+
+
+def test_associate_lines_to_rows():
+    """測試線段與表格列關聯"""
+    lines = [
+        RedLine(pixel_path=[(50, 50), (150, 50)], line_type="solid", confidence=0.9),
+    ]
+    markers = [RedMarker(center=(100, 52), radius=5, marker_label=None, confidence=0.9)]
+    mtl = associate_markers_to_lines(lines, markers)
+    rows = [
+        TableRow("①", "12:00", "B-52", "轟炸", "2", "備註", "{}"),
+        TableRow("④", "14:00", "氣球", "空飄", "2", "消失", "{}"),
+    ]
+    assoc = associate_lines_to_rows(lines, markers, mtl, rows, polygon_count=1)
+    assert isinstance(assoc, list)

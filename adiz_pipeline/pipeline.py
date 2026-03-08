@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .association import associate_polygons_to_rows
+from .association import (
+    associate_lines_to_rows,
+    associate_markers_to_lines,
+    associate_polygons_to_rows,
+)
 from .bigquery_loader import (
     load_detections,
     load_events,
@@ -25,14 +29,21 @@ from .config import (
     CONFIDENCE_REVIEW,
     DEFAULT_IMAGES_DIR,
 )
-from .coordinate_converter import pixel_to_geography
+from .coordinate_converter import pixel_line_to_geography, pixel_to_geography
 from .image_loader import load_image
 from .ocr_gemini import (
     TableRow,
     compute_ocr_confidence_breakdown,
     extract_table_ocr,
 )
-from .red_detector import RedPolygon, detect_red_regions
+from .red_detector import (
+    RedLine,
+    RedMarker,
+    RedPolygon,
+    detect_red_lines,
+    detect_red_markers,
+    detect_red_regions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +116,14 @@ def process_single_image(
         raw_row["error_code"] = "LOAD_FAILED"
         return raw_row, [], [], [], None
 
-    # 1. 紅框偵測
+    # 1. 紅框偵測（多邊形、線段、標點）
     polygons = detect_red_regions(img)
-    if not polygons:
+    markers = detect_red_markers(img)
+    lines: List[RedLine] = detect_red_lines(img, exclude_polygons=polygons, exclude_markers=markers)
+
+    if not polygons and not lines:
         raw_row["processing_status"] = "no_red_regions"
         raw_row["error_code"] = "NO_RED_REGIONS"
-        # 仍嘗試 OCR
         polygons = []
 
     # 2. OCR
@@ -125,10 +138,83 @@ def process_single_image(
         })
 
     # 3. 關聯
-    associations = associate_polygons_to_rows(polygons, rows) if rows else []
+    polygon_associations = associate_polygons_to_rows(polygons, rows) if rows else []
+    marker_to_line = associate_markers_to_lines(lines, markers)
+    line_associations = (
+        associate_lines_to_rows(lines, markers, marker_to_line, rows, polygon_count=len(polygons))
+        if rows else []
+    )
 
     # 4. 座標轉換 + 組裝 detections / events
     h, w = img.shape[:2]
+
+    # 4a. 線段為主體：輸出 line_geometry + line_text
+    for li, line in enumerate(lines):
+        det_id = str(uuid.uuid4())
+        line_geom_wkt, line_geom_conf = pixel_line_to_geography(
+            line.pixel_path, img_size=(w, h)
+        )
+        row_idx = next((a[1] for a in line_associations if a[0] == li), None)
+        assoc_conf = next((a[2] for a in line_associations if a[0] == li), 0.5)
+        line_markers = marker_to_line.get(li, [])
+        marker_centers = [markers[mi].center for mi in line_markers] if line_markers else []
+
+        line_text = ""
+        if row_idx is not None and row_idx < len(rows):
+            row = rows[row_idx]
+            parts = [row.event_time, row.aircraft_type, row.remarks]
+            line_text = " | ".join(str(p) for p in parts if p)
+
+        conf = line.confidence * 0.5 + line_geom_conf * 0.5
+        if rows:
+            conf = conf * 0.7 + ocr_conf * 0.3
+
+        detections.append({
+            "detection_id": det_id,
+            "source_id": source_id,
+            "source_image_id": source_id,
+            "pixel_polygon": None,
+            "pixel_bbox": None,
+            "geometry": None,
+            "geometry_type": "linestring",
+            "line_geometry": line_geom_wkt,
+            "line_type": line.line_type,
+            "pixel_line": json.dumps(line.pixel_path),
+            "marker_center_pixel": json.dumps(marker_centers) if marker_centers else None,
+            "association_confidence": assoc_conf,
+            "ocr_raw_text": ocr_raw[:5000] if ocr_raw else "",
+            "confidence_score": conf,
+            "confidence_breakdown": json.dumps({
+                "line_confidence": line.confidence,
+                "geom_confidence": line_geom_conf,
+                "ocr_confidence": ocr_conf,
+            }),
+            "error_code": None,
+            "review_status": review_status_from_confidence(conf),
+        })
+
+        if row_idx is not None and row_idx < len(rows):
+            row = rows[row_idx]
+            event_conf = conf * 0.7 + assoc_conf * 0.3
+            events.append({
+                "event_id": str(uuid.uuid4()),
+                "source_id": source_id,
+                "detection_id": det_id,
+                "item_no": row.item_no,
+                "event_time": row.event_time,
+                "aircraft_type": row.aircraft_type,
+                "mission_type": row.mission_type,
+                "flight_no": row.flight_no,
+                "remarks": row.remarks,
+                "geometry": line_geom_wkt,
+                "line_geometry": line_geom_wkt,
+                "line_type": line.line_type,
+                "line_text": line_text or row.raw_text,
+                "review_status": review_status_from_confidence(event_conf),
+                "source_text": row.raw_text,
+            })
+
+    # 4b. 多邊形（維持相容）
     for pi, poly in enumerate(polygons):
         det_id = str(uuid.uuid4())
         geom_wkt, geom_conf = pixel_to_geography(poly.pixel_polygon, img_size=(w, h))
@@ -143,6 +229,12 @@ def process_single_image(
             "pixel_polygon": json.dumps(poly.pixel_polygon),
             "pixel_bbox": json.dumps(poly.pixel_bbox),
             "geometry": geom_wkt,
+            "geometry_type": "polygon",
+            "line_geometry": None,
+            "line_type": None,
+            "pixel_line": None,
+            "marker_center_pixel": None,
+            "association_confidence": None,
             "ocr_raw_text": ocr_raw[:5000] if ocr_raw else "",
             "confidence_score": conf,
             "confidence_breakdown": json.dumps({
@@ -155,10 +247,10 @@ def process_single_image(
         })
 
         # 找對應的 row
-        row_idx = next((a[1] for a in associations if a[0] == pi), None)
+        row_idx = next((a[1] for a in polygon_associations if a[0] == pi), None)
         if row_idx is not None and row_idx < len(rows):
             row = rows[row_idx]
-            assoc_conf = next((a[2] for a in associations if a[0] == pi), 0.5)
+            assoc_conf = next((a[2] for a in polygon_associations if a[0] == pi), 0.5)
             event_conf = conf * 0.7 + assoc_conf * 0.3
             events.append({
                 "event_id": str(uuid.uuid4()),
@@ -171,6 +263,9 @@ def process_single_image(
                 "flight_no": row.flight_no,
                 "remarks": row.remarks,
                 "geometry": geom_wkt,
+                "line_geometry": None,
+                "line_type": None,
+                "line_text": None,
                 "review_status": review_status_from_confidence(event_conf),
                 "source_text": row.raw_text,
             })
@@ -180,6 +275,8 @@ def process_single_image(
 
     stats = {
         "polygon_count": len(polygons),
+        "line_count": len(lines),
+        "marker_count": len(markers),
         "ocr_row_count": len(rows),
         "detection_count": len(detections),
         "event_count": len(events),

@@ -1,21 +1,35 @@
 """
 紅色框線區域偵測
-在地圖 ROI 內做紅色分割，輸出多邊形頂點。
+在地圖 ROI 內做紅色分割，輸出多邊形頂點、線段、標點。
 """
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .config import (
+    DASHED_ANGLE_TOLERANCE,
+    LINE_EXCLUDE_DILATE,
+    LINE_ROI_LEFT,
     MAP_ROI_BOTTOM,
     MAP_ROI_LEFT,
     MAP_ROI_RIGHT,
     MAP_ROI_TOP,
+    MAX_LINE_GAP,
+    MAX_MARKER_AREA,
+    MAX_POLYGON_AREA,
+    MAX_POLYGON_CIRCULARITY,
+    MIN_LINE_LENGTH,
+    MIN_MARKER_AREA,
+    MIN_MARKER_CIRCULARITY,
+    MIN_PATH_LENGTH,
     MIN_POLYGON_AREA,
+    POLYGON_APPROX_EPS,
     RED_HUE_RANGE,
     RED_HUE_RANGE_2,
+    RED_SAT_MIN,
+    RED_VAL_MIN,
 )
 
 
@@ -26,6 +40,240 @@ class RedPolygon:
     pixel_bbox: Tuple[float, float, float, float]  # x, y, w, h
     area: float
     confidence: float  # 0~1，基於形狀閉合性、面積合理性
+
+
+@dataclass
+class RedLine:
+    """紅色線段（實線或虛線）"""
+    pixel_path: List[Tuple[float, float]]
+    line_type: Literal["solid", "dashed"]
+    confidence: float  # 0~1
+
+
+@dataclass
+class RedMarker:
+    """紅色圓形標點"""
+    center: Tuple[float, float]
+    radius: float
+    marker_label: Optional[str]  # 若可辨識編號
+    confidence: float  # 0~1
+
+
+def _get_red_mask(roi: np.ndarray) -> np.ndarray:
+    """從 ROI 取得紅色二值遮罩（含低飽和度紅色）"""
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask1 = cv2.inRange(hsv, (RED_HUE_RANGE[0], RED_SAT_MIN, RED_VAL_MIN), (RED_HUE_RANGE[1], 255, 255))
+    mask2 = cv2.inRange(hsv, (RED_HUE_RANGE_2[0], RED_SAT_MIN, RED_VAL_MIN), (RED_HUE_RANGE_2[1], 255, 255))
+    return cv2.bitwise_or(mask1, mask2)
+
+
+def _merge_line_segments(
+    segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    max_gap: float = MAX_LINE_GAP,
+    angle_tol_deg: float = DASHED_ANGLE_TOLERANCE,
+) -> List[List[Tuple[float, float]]]:
+    """
+    合併鄰近且方向一致的線段為路徑。
+    回傳 [(x1,y1), (x2,y2), ...] 的列表。
+    """
+    if not segments:
+        return []
+
+    def _angle(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        import math
+        return math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
+
+    def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    def _angle_diff(a1: float, a2: float) -> float:
+        d = abs(a1 - a2)
+        return min(d, 360 - d)
+
+    paths: List[List[Tuple[float, float]]] = []
+    used = [False] * len(segments)
+
+    for i, (p1, p2) in enumerate(segments):
+        if used[i]:
+            continue
+        seg_angle = _angle(p1, p2)
+        path = [p1, p2]
+        used[i] = True
+
+        changed = True
+        while changed:
+            changed = False
+            for j, (q1, q2) in enumerate(segments):
+                if used[j]:
+                    continue
+                seg_j_angle = _angle(q1, q2)
+                if _angle_diff(seg_angle, seg_j_angle) > angle_tol_deg:
+                    continue
+
+                head, tail = path[0], path[-1]
+                d_hq1 = _dist(head, q1)
+                d_hq2 = _dist(head, q2)
+                d_tq1 = _dist(tail, q1)
+                d_tq2 = _dist(tail, q2)
+                min_d = min(d_hq1, d_hq2, d_tq1, d_tq2)
+                if min_d > max_gap:
+                    continue
+
+                if min_d == d_tq1:
+                    path.append(q2)
+                elif min_d == d_tq2:
+                    path.append(q1)
+                elif min_d == d_hq1:
+                    path.insert(0, q2)
+                else:
+                    path.insert(0, q1)
+                used[j] = True
+                changed = True
+                break
+
+        paths.append(path)
+
+    return paths
+
+
+def _infer_line_type(path: List[Tuple[float, float]]) -> Literal["solid", "dashed"]:
+    """依路徑點數推斷 solid/dashed（多點通常為合併後的虛線）"""
+    return "dashed" if len(path) > 3 else "solid"
+
+
+def detect_red_lines(
+    img: np.ndarray,
+    min_length: int = MIN_LINE_LENGTH,
+    max_gap: float = MAX_LINE_GAP,
+    min_path_length: float = MIN_PATH_LENGTH,
+    exclude_polygons: Optional[List["RedPolygon"]] = None,
+    exclude_markers: Optional[List["RedMarker"]] = None,
+) -> List[RedLine]:
+    """
+    偵測紅色實線與虛線（路徑線，非多邊形邊框）。
+    使用 Hough 線偵測 + 鄰近段合併，可排除多邊形區域。
+    """
+    h, w = img.shape[:2]
+    roi = img[
+        int(h * MAP_ROI_TOP):int(h * MAP_ROI_BOTTOM),
+        int(w * MAP_ROI_LEFT):int(w * MAP_ROI_RIGHT),
+    ]
+    roi_h, roi_w = roi.shape[:2]
+    offset_x = int(w * MAP_ROI_LEFT)
+    offset_y = int(h * MAP_ROI_TOP)
+
+    red_mask = _get_red_mask(roi)
+    # 排除左側表格區
+    left_cut = int(roi_w * LINE_ROI_LEFT)
+    if left_cut > 0:
+        red_mask[:, :left_cut] = 0
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    line_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+    line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel)
+
+    # 排除多邊形與標點區域（含邊框膨脹），避免將邊框誤檢為線段
+    exclude_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    if exclude_polygons:
+        for poly in exclude_polygons:
+            pts = np.array(
+                [[p[0] - offset_x, p[1] - offset_y] for p in poly.pixel_polygon],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(exclude_mask, [pts], 255)
+            cv2.drawContours(exclude_mask, [pts], -1, 255, thickness=LINE_EXCLUDE_DILATE + 2)
+    if exclude_markers:
+        for m in exclude_markers:
+            cx, cy = int(m.center[0] - offset_x), int(m.center[1] - offset_y)
+            r = int(m.radius) + 4
+            if 0 <= cx < roi_w and 0 <= cy < roi_h:
+                cv2.circle(exclude_mask, (cx, cy), max(r, 10), 255, -1)
+    if np.any(exclude_mask > 0):
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (LINE_EXCLUDE_DILATE, LINE_EXCLUDE_DILATE))
+        exclude_mask = cv2.dilate(exclude_mask, dilate_k)
+        line_mask = cv2.subtract(line_mask, exclude_mask)
+
+    # Hough 線段偵測
+    segments_raw = cv2.HoughLinesP(
+        line_mask,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=20,
+        minLineLength=min_length,
+        maxLineGap=max_gap,
+    )
+    if segments_raw is None:
+        return []
+
+    segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    for seg in segments_raw:
+        x1, y1, x2, y2 = seg[0]
+        segments.append(((float(x1), float(y1)), (float(x2), float(y2))))
+
+    merged = _merge_line_segments(segments, max_gap=max_gap)
+
+    lines: List[RedLine] = []
+    for path in merged:
+        if len(path) < 2:
+            continue
+        # 加回 ROI 偏移
+        path_global = [
+            (p[0] + offset_x, p[1] + offset_y) for p in path
+        ]
+        length = sum(
+            ((path_global[i+1][0]-path_global[i][0])**2 + (path_global[i+1][1]-path_global[i][1])**2)**0.5
+            for i in range(len(path_global)-1)
+        )
+        if length < min_path_length:
+            continue
+        line_type = _infer_line_type(path)
+        conf = min(1.0, length / 100.0) * 0.5 + 0.5
+        lines.append(RedLine(pixel_path=path_global, line_type=line_type, confidence=conf))
+
+    return lines
+
+
+def detect_red_markers(
+    img: np.ndarray,
+    min_area: int = MIN_MARKER_AREA,
+    max_area: int = MAX_MARKER_AREA,
+    min_circularity: float = MIN_MARKER_CIRCULARITY,
+) -> List[RedMarker]:
+    """
+    偵測紅色圓形標點。
+    以圓形度與面積篩選。
+    """
+    h, w = img.shape[:2]
+    roi = img[
+        int(h * MAP_ROI_TOP):int(h * MAP_ROI_BOTTOM),
+        int(w * MAP_ROI_LEFT):int(w * MAP_ROI_RIGHT),
+    ]
+    offset_x = int(w * MAP_ROI_LEFT)
+    offset_y = int(h * MAP_ROI_TOP)
+
+    red_mask = _get_red_mask(roi)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    markers: List[RedMarker] = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area or area > max_area:
+            continue
+        peri = cv2.arcLength(cnt, True)
+        if peri <= 0:
+            continue
+        circularity = 4 * np.pi * area / (peri * peri)
+        if circularity < min_circularity:
+            continue
+        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+        center = (float(cx) + offset_x, float(cy) + offset_y)
+        conf = min(1.0, circularity)
+        markers.append(RedMarker(center=center, radius=float(r), marker_label=None, confidence=conf))
+
+    return markers
 
 
 def detect_red_regions(
@@ -46,16 +294,12 @@ def detect_red_regions(
     offset_x = int(w * MAP_ROI_LEFT)
     offset_y = int(h * MAP_ROI_TOP)
 
-    # HSV 紅色分割
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask1 = cv2.inRange(hsv, (RED_HUE_RANGE[0], 100, 100), (RED_HUE_RANGE[1], 255, 255))
-    mask2 = cv2.inRange(hsv, (RED_HUE_RANGE_2[0], 100, 100), (RED_HUE_RANGE_2[1], 255, 255))
-    red_mask = cv2.bitwise_or(mask1, mask2)
-
-    # 形態學處理，連接斷線
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+    red_mask = _get_red_mask(roi)
+    # 形態學處理，連接斷線（較強閉合以處理虛線邊框）
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open)
 
     # 找輪廓
     contours, _ = cv2.findContours(
@@ -69,10 +313,18 @@ def detect_red_regions(
         area = cv2.contourArea(cnt)
         if area < min_area or area > max_area:
             continue
+        if area > MAX_POLYGON_AREA:
+            continue
 
-        # 近似多邊形
         peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        if peri <= 0:
+            continue
+        circularity = 4 * np.pi * area / (peri * peri)
+        if circularity > MAX_POLYGON_CIRCULARITY:
+            continue
+
+        # 近似多邊形（略放寬誤差以保留細長輪廓的頂點）
+        approx = cv2.approxPolyDP(cnt, POLYGON_APPROX_EPS * peri, True)
 
         if len(approx) < 3:
             continue
@@ -97,5 +349,28 @@ def detect_red_regions(
             area=area,
             confidence=min(1.0, confidence),
         ))
+
+    # NMS：重疊多邊形保留較大者
+    if len(polygons) > 1:
+        sorted_p = sorted(polygons, key=lambda p: p.area, reverse=True)
+        keep = []
+        for pi in sorted_p:
+            xi, yi, wi, hi = pi.pixel_bbox
+            ai = pi.area
+            discard = False
+            for pj in keep:
+                xj, yj, wj, hj = pj.pixel_bbox
+                inter_x = max(xi, xj)
+                inter_y = max(yi, yj)
+                inter_w = min(xi + wi, xj + wj) - inter_x
+                inter_h = min(yi + hi, yj + hj) - inter_y
+                if inter_w > 0 and inter_h > 0:
+                    inter_area = inter_w * inter_h
+                    if inter_area / ai > 0.5:
+                        discard = True
+                        break
+            if not discard:
+                keep.append(pi)
+        polygons = keep
 
     return polygons

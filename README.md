@@ -2,6 +2,73 @@
 
 從 [國防部區域動態列表](https://www.mnd.gov.tw/news/plaactlist) 爬取公告中的防空識別區示意圖，並**自動抽取紅色活動區塊座標**與**左上角表格文字**，寫入 BigQuery 供查詢與稽核。
 
+---
+
+## 本地快速開始
+
+### 1. 克隆專案
+
+```bash
+git clone https://github.com/wu02067602/flight-information-region.git
+cd flight-information-region
+```
+
+### 2. 安裝依賴
+
+```bash
+pip install -r requirements.txt
+```
+
+建議使用虛擬環境：
+
+```bash
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. 設定環境變數
+
+```bash
+cp .env.example .env
+# 編輯 .env 填入 GEMINI_API_KEY（OCR 必填）、BQ_PROJECT（入庫時必填）
+```
+
+### 4. 使用範例圖片測試（無需爬蟲）
+
+專案內含 `exmpel/` 目錄（23 張範例圖），可直接執行：
+
+```bash
+# 使用 exmpel 目錄跑 pipeline，不寫入 BigQuery（適合本地測試）
+python run_pipeline.py -i exmpel --max-images 5 --no-bigquery
+
+# 完整跑完 exmpel 並輸出報告
+python run_pipeline.py -i exmpel --no-bigquery --report report.json
+
+# 每張圖片的詳細偵測結果（多邊形、線段、標點）
+python test_pipeline_on_examples.py
+```
+
+### 5. 執行單元測試
+
+```bash
+pytest tests/test_pipeline.py -v
+```
+
+### 6. 使用自己的圖片
+
+將圖片放在 `adiz_images/<article_id>/000.jpg` 結構下，或先執行爬蟲：
+
+```bash
+python adiz_image_scraper.py
+python run_pipeline.py --no-bigquery
+```
+
+---
+
 ## 專案結構
 
 ```
@@ -101,3 +168,72 @@ python run_pipeline.py -i adiz_images --report report.json
 - 校正點（`DEFAULT_CALIBRATION_POINTS`）需依實際圖檔版型調整
 - 紅框偵測參數（HSV、面積門檻）可於 `config.py` 微調
 - 若無 BigQuery 憑證，使用 `--no-bigquery` 可僅產出報告
+
+---
+
+## 開發過程與研究記錄
+
+### 功能擴充（紅線經緯度與文字對應）
+
+在既有紅框偵測基礎上，新增：
+
+- **線段偵測**：紅色實線／虛線路徑，輸出 `LINESTRING` 經緯度
+- **標點偵測**：紅色圓形標記（①②③④⑤），與線段關聯
+- **關聯邏輯**：標點 ↔ 線段 ↔ OCR 表格列（`line_text`）
+
+### 名詞定義（人工標註用）
+
+| 名詞 | 定義 |
+|------|------|
+| **多邊形** | 紅色實心框線圍成的封閉區域（矩形），如活動區 ①②③ |
+| **線段** | 紅色實線或虛線路徑（航線、氣球軌跡等） |
+| **標點** | 地圖上紅色圓形標記，通常帶編號 ④⑤ |
+| **Detection** | 多邊形數 + 線段數（標點不單獨計入） |
+
+### 研究發現（效果不佳原因）
+
+1. **多邊形漏檢**：面積門檻過高、圓形度排除圓角矩形、輪廓近似後頂點不足
+2. **線段誤檢**：多邊形偵測失敗時，邊框被 Hough 當成線段
+3. **標點漏檢**：與多邊形重疊、圓形度門檻過嚴
+
+### 參數調適摘要
+
+| 類別 | 主要調整 |
+|------|----------|
+| HSV | `RED_SAT_MIN` 35、`RED_VAL_MIN` 90（實圖紅色偏淡） |
+| 多邊形 | `MIN_POLYGON_AREA` 180、`MAX_POLYGON_CIRCULARITY` 0.88、NMS 重疊過濾 |
+| 線段 | `MIN_LINE_LENGTH` 130、`MIN_PATH_LENGTH` 100、排除多邊形/標點、`LINE_ROI_LEFT` 0.32 |
+| 標點 | `MIN_MARKER_AREA` 25、`MIN_MARKER_CIRCULARITY` 0.28 |
+| ROI | `MAP_ROI_TOP` 0.28、線段偵測排除左側表格區 |
+
+### 測試結果（exmpel 23 張，人工標註對照）
+
+| 圖片 | 多邊形 | 線段 | 標點 | Detection | 人工標註 |
+|------|:------:|:----:|:----:|:---------:|:--------:|
+| 84835 | 2 | 2 | 4 | 4 | 3/0/6 |
+| 84840 | 2 | 0 | 7 | 2 | 3/0/6 |
+| 84844 | 2 | 0 | 6 | 2 | 3/0/6 |
+| 84846 | 1 | 2 | 6 | 3 | 2/0/4 |
+| 84850 | 2 | 0 | 5 | 2 | 1/0/2 |
+| 84852 | 1 | 2 | 2 | 3 | 2/0/4 |
+| 84854 | 1 | 1 | 6 | 2 | 2/0/4 |
+| 84857 | 3 | 0 | 9 | 3 | 2/0/4 |
+| 84863 | 0 | 2 | 6 | 2 | 3/0/6 |
+| 84866 | 1 | 1 | 1 | 2 | 1/0/2 |
+| 84869 | 1 | 1 | 2 | 2 | 2/0/4 |
+| 84876 | 1 | 0 | 1 | 1 | 1/0/2 |
+| 84881 | 2 | 0 | 2 | 2 | 2/0/4 |
+| 84884 | 2 | 1 | 11 | 3 | 3/0/6 |
+| 84889 | 2 | 0 | 2 | 2 | 2/0/4 |
+| 84891 | 3 | 1 | 3 | 4 | 2/0/4 |
+| 84894 | 3 | 0 | 13 | 3 | 3/0/6 |
+| 84896 | 5 | 0 | 15 | 5 | 4/0/8 |
+| 84900 | 4 | 4 | 16 | 8 | 4/0/8 |
+| 84905 | 4 | 0 | 7 | 4 | 3/0/6 |
+| 86194 | 0 | 1 | 0 | 1 | 1/0/2 |
+| 86205 | 2 | 0 | 6 | 2 | 3/0/6 |
+| 86248 | 3 | 1 | 11 | 4 | 3/2/12 |
+
+**彙總**：總 Detection 66、總誤差 |pred-gt| 為 poly=18、line=19、marker=57。多邊形與線段皆正確者：84876、84881、84889、84894。
+
+**測試指令**：`python test_pipeline_on_examples.py`（使用 exmpel 目錄）
