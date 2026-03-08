@@ -2,6 +2,73 @@
 
 從 [國防部區域動態列表](https://www.mnd.gov.tw/news/plaactlist) 爬取公告中的防空識別區示意圖，並**自動抽取紅色活動區塊座標**與**左上角表格文字**，寫入 BigQuery 供查詢與稽核。
 
+---
+
+## 本地快速開始
+
+### 1. 克隆專案
+
+```bash
+git clone https://github.com/wu02067602/flight-information-region.git
+cd flight-information-region
+```
+
+### 2. 安裝依賴
+
+```bash
+pip install -r requirements.txt
+```
+
+建議使用虛擬環境：
+
+```bash
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. 設定環境變數
+
+```bash
+cp .env.example .env
+# 編輯 .env 填入 GEMINI_API_KEY（OCR 必填）、BQ_PROJECT（入庫時必填）
+```
+
+### 4. 使用範例圖片測試（無需爬蟲）
+
+專案內含 `exmpel/` 目錄（23 張範例圖），可直接執行：
+
+```bash
+# 使用 exmpel 目錄跑 pipeline，不寫入 BigQuery（適合本地測試）
+python run_pipeline.py -i exmpel --max-images 5 --no-bigquery
+
+# 完整跑完 exmpel 並輸出報告
+python run_pipeline.py -i exmpel --no-bigquery --report report.json
+
+# 每張圖片的詳細偵測結果（多邊形、線段、標點）
+python test_pipeline_on_examples.py
+```
+
+### 5. 執行單元測試
+
+```bash
+pytest tests/test_pipeline.py -v
+```
+
+### 6. 使用自己的圖片
+
+將圖片放在 `adiz_images/<article_id>/000.jpg` 結構下，或先執行爬蟲：
+
+```bash
+python adiz_image_scraper.py
+python run_pipeline.py --no-bigquery
+```
+
+---
+
 ## 專案結構
 
 ```
