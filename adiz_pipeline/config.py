@@ -26,16 +26,23 @@ BQ_OCR_ERROR_QUEUE_TABLE = "ocr_error_queue"
 # 紅框偵測參數
 RED_HUE_RANGE = (0, 15)  # HSV 紅色主色調
 RED_HUE_RANGE_2 = (165, 180)  # HSV 紅色另一端
-MIN_POLYGON_AREA = 500  # 最小多邊形面積（像素²）
+RED_SAT_MIN = 35  # HSV 飽和度下限（實圖紅色偏淡，過低會納入表格）
+RED_VAL_MIN = 90  # HSV 明度下限
+MIN_POLYGON_AREA = 250  # 最小多邊形面積（像素²）
+MAX_POLYGON_AREA = 15000  # 最大多邊形面積（排除過大雜訊）
 MAX_POLYGON_AREA_RATIO = 0.5  # 最大面積佔圖比例
+MAX_POLYGON_CIRCULARITY = 0.82  # 最大圓形度（排除圓形標點誤判為多邊形）
 
-# 線段偵測參數
-MIN_LINE_LENGTH = 20  # 最小線段長度（像素）
-MAX_LINE_GAP = 15  # 虛線合併時最大間距（像素）
-DASHED_ANGLE_TOLERANCE = 15  # 虛線段方向容忍（度）
-MIN_MARKER_AREA = 80  # 最小標點面積（像素²）
-MAX_MARKER_AREA = 3000  # 最大標點面積（像素²）
-MIN_MARKER_CIRCULARITY = 0.5  # 最小圓形度（4*pi*area/perimeter^2）
+# 線段偵測參數（僅 86248 等少數圖有路徑線，需嚴格避免誤檢多邊形邊框）
+MIN_LINE_LENGTH = 100  # 最小線段長度（像素），排除短邊
+MAX_LINE_GAP = 8  # 虛線合併時最大間距（像素）
+DASHED_ANGLE_TOLERANCE = 12  # 虛線段方向容忍（度）
+MIN_PATH_LENGTH = 150  # 合併後路徑最小總長（像素），僅保留長路徑
+
+# 標點偵測參數（實圖標點較小且可能含數字）
+MIN_MARKER_AREA = 25  # 最小標點面積（像素²）
+MAX_MARKER_AREA = 8000  # 最大標點面積（像素²）
+MIN_MARKER_CIRCULARITY = 0.35  # 最小圓形度
 
 # 表格 ROI（左上角，佔圖比例）
 TABLE_ROI_LEFT = 0.0
@@ -45,7 +52,7 @@ TABLE_ROI_BOTTOM = 0.25
 
 # 地圖 ROI（排除左上角表格）
 MAP_ROI_LEFT = 0.0
-MAP_ROI_TOP = 0.2
+MAP_ROI_TOP = 0.28  # 提高以排除表格區
 MAP_ROI_RIGHT = 1.0
 MAP_ROI_BOTTOM = 1.0
 

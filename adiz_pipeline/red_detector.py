@@ -16,12 +16,17 @@ from .config import (
     MAP_ROI_TOP,
     MAX_LINE_GAP,
     MAX_MARKER_AREA,
+    MAX_POLYGON_AREA,
+    MAX_POLYGON_CIRCULARITY,
     MIN_LINE_LENGTH,
     MIN_MARKER_AREA,
     MIN_MARKER_CIRCULARITY,
+    MIN_PATH_LENGTH,
     MIN_POLYGON_AREA,
     RED_HUE_RANGE,
     RED_HUE_RANGE_2,
+    RED_SAT_MIN,
+    RED_VAL_MIN,
 )
 
 
@@ -52,10 +57,10 @@ class RedMarker:
 
 
 def _get_red_mask(roi: np.ndarray) -> np.ndarray:
-    """從 ROI 取得紅色二值遮罩"""
+    """從 ROI 取得紅色二值遮罩（含低飽和度紅色）"""
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask1 = cv2.inRange(hsv, (RED_HUE_RANGE[0], 100, 100), (RED_HUE_RANGE[1], 255, 255))
-    mask2 = cv2.inRange(hsv, (RED_HUE_RANGE_2[0], 100, 100), (RED_HUE_RANGE_2[1], 255, 255))
+    mask1 = cv2.inRange(hsv, (RED_HUE_RANGE[0], RED_SAT_MIN, RED_VAL_MIN), (RED_HUE_RANGE[1], 255, 255))
+    mask2 = cv2.inRange(hsv, (RED_HUE_RANGE_2[0], RED_SAT_MIN, RED_VAL_MIN), (RED_HUE_RANGE_2[1], 255, 255))
     return cv2.bitwise_or(mask1, mask2)
 
 
@@ -137,16 +142,20 @@ def detect_red_lines(
     img: np.ndarray,
     min_length: int = MIN_LINE_LENGTH,
     max_gap: float = MAX_LINE_GAP,
+    min_path_length: float = MIN_PATH_LENGTH,
+    exclude_polygons: Optional[List["RedPolygon"]] = None,
+    exclude_markers: Optional[List["RedMarker"]] = None,
 ) -> List[RedLine]:
     """
-    偵測紅色實線與虛線。
-    使用 Hough 線偵測 + 鄰近段合併。
+    偵測紅色實線與虛線（路徑線，非多邊形邊框）。
+    使用 Hough 線偵測 + 鄰近段合併，可排除多邊形區域。
     """
     h, w = img.shape[:2]
     roi = img[
         int(h * MAP_ROI_TOP):int(h * MAP_ROI_BOTTOM),
         int(w * MAP_ROI_LEFT):int(w * MAP_ROI_RIGHT),
     ]
+    roi_h, roi_w = roi.shape[:2]
     offset_x = int(w * MAP_ROI_LEFT)
     offset_y = int(h * MAP_ROI_TOP)
 
@@ -154,6 +163,26 @@ def detect_red_lines(
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
     line_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
     line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel)
+
+    # 排除多邊形與標點區域，避免將邊框/圓弧誤檢為線段
+    exclude_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    if exclude_polygons:
+        for poly in exclude_polygons:
+            pts = np.array(
+                [[p[0] - offset_x, p[1] - offset_y] for p in poly.pixel_polygon],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(exclude_mask, [pts], 255)
+    if exclude_markers:
+        for m in exclude_markers:
+            cx, cy = int(m.center[0] - offset_x), int(m.center[1] - offset_y)
+            r = int(m.radius) + 8
+            if 0 <= cx < roi_w and 0 <= cy < roi_h:
+                cv2.circle(exclude_mask, (cx, cy), max(r, 15), 255, -1)
+    if np.any(exclude_mask > 0):
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        exclude_mask = cv2.dilate(exclude_mask, dilate_k)
+        line_mask = cv2.subtract(line_mask, exclude_mask)
 
     # Hough 線段偵測
     segments_raw = cv2.HoughLinesP(
@@ -182,11 +211,13 @@ def detect_red_lines(
         path_global = [
             (p[0] + offset_x, p[1] + offset_y) for p in path
         ]
-        line_type = _infer_line_type(path)
         length = sum(
             ((path_global[i+1][0]-path_global[i][0])**2 + (path_global[i+1][1]-path_global[i][1])**2)**0.5
             for i in range(len(path_global)-1)
         )
+        if length < min_path_length:
+            continue
+        line_type = _infer_line_type(path)
         conf = min(1.0, length / 100.0) * 0.5 + 0.5
         lines.append(RedLine(pixel_path=path_global, line_type=line_type, confidence=conf))
 
@@ -273,9 +304,17 @@ def detect_red_regions(
         area = cv2.contourArea(cnt)
         if area < min_area or area > max_area:
             continue
+        if area > MAX_POLYGON_AREA:
+            continue
+
+        peri = cv2.arcLength(cnt, True)
+        if peri <= 0:
+            continue
+        circularity = 4 * np.pi * area / (peri * peri)
+        if circularity > MAX_POLYGON_CIRCULARITY:
+            continue
 
         # 近似多邊形
-        peri = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
 
         if len(approx) < 3:

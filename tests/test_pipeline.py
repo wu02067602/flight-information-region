@@ -70,10 +70,10 @@ def test_validate_geometry():
 
 
 def test_detect_red_lines():
-    """合成圖測試紅色線段偵測"""
+    """合成圖測試紅色線段偵測（線需在 MAP_ROI 內，y>=28%*h）"""
     img = np.zeros((200, 200, 3), dtype=np.uint8)
-    img[50:52, 20:180] = [0, 0, 255]  # BGR 紅色實線
-    lines = detect_red_lines(img, min_length=15)
+    img[80:82, 20:180] = [0, 0, 255]  # BGR 紅色實線，在 ROI 內
+    lines = detect_red_lines(img, min_length=15, min_path_length=50)
     assert isinstance(lines, list)
     assert len(lines) >= 1
     assert lines[0].line_type in ("solid", "dashed")

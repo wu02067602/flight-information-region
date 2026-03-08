@@ -118,8 +118,8 @@ def process_single_image(
 
     # 1. 紅框偵測（多邊形、線段、標點）
     polygons = detect_red_regions(img)
-    lines: List[RedLine] = detect_red_lines(img)
-    markers: List[RedMarker] = detect_red_markers(img)
+    markers = detect_red_markers(img)
+    lines: List[RedLine] = detect_red_lines(img, exclude_polygons=polygons, exclude_markers=markers)
 
     if not polygons and not lines:
         raw_row["processing_status"] = "no_red_regions"
